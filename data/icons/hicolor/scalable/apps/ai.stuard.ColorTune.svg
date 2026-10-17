@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3a3a"/>
+      <stop offset="1" stop-color="#232323"/>
+    </linearGradient>
+    <linearGradient id="gb" gradientUnits="userSpaceOnUse" x1="43.7" y1="22.9" x2="43.7" y2="102.0">
+      <stop offset="0" stop-color="#2ee06a"/>
+      <stop offset="0.55" stop-color="#18b7c9"/>
+      <stop offset="1" stop-color="#3a3dff"/>
+    </linearGradient>
+    <linearGradient id="red" gradientUnits="userSpaceOnUse" x1="36.0" y1="0" x2="101.9" y2="0">
+      <stop offset="0.35" stop-color="#ff3b30" stop-opacity="0"/>
+      <stop offset="0.75" stop-color="#ffb21e" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#ff3b30"/>
+    </linearGradient>
+    <linearGradient id="mag" gradientUnits="userSpaceOnUse" x1="0" y1="69.5" x2="0" y2="102.0">
+      <stop offset="0" stop-color="#d63bd6" stop-opacity="0"/>
+      <stop offset="1" stop-color="#c02fd0" stop-opacity="0.9"/>
+    </linearGradient>
+    <radialGradient id="white" gradientUnits="userSpaceOnUse" cx="58.5" cy="69.5" r="22">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="locus"><path d="M44.11,101.51 L44.08,101.52 L44.02,101.53 L43.95,101.53 L43.83,101.50 L43.57,101.32 L43.10,100.92 L42.29,100.25 L40.98,99.06 L40.09,98.06 L38.91,96.29 L37.40,93.42 L35.50,88.89 L33.14,82.17 L30.72,72.85 L28.44,61.22 L26.85,48.79 L26.41,37.29 L27.45,27.86 L30.05,21.76 L33.73,19.60 L37.88,20.35 L42.09,22.36 L46.06,24.76 L49.88,27.46 L53.64,30.42 L57.37,33.58 L61.08,36.89 L64.80,40.28 L68.50,43.73 L72.19,47.18 L75.80,50.59 L79.30,53.91 L82.66,57.09 L85.82,60.08 L88.70,62.82 L91.21,65.19 L93.41,67.27 L95.24,68.99 L96.73,70.41 L97.92,71.53 L98.86,72.42 L99.62,73.14 L100.26,73.75 L100.78,74.24 L101.19,74.63 L101.50,74.92 L101.92,75.32 L102.27,75.65 L102.41,75.78 Z"/></clipPath>
+  </defs>
+  <!-- tile with a bottom lip, GNOME style -->
+  <rect x="10" y="14" width="108" height="104" rx="22" fill="#141414"/>
+  <rect x="10" y="10" width="108" height="104" rx="22" fill="url(#tile)"/>
+  <rect x="10.5" y="10.5" width="107" height="103" rx="21.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- chromaticity diagram -->
+  <g clip-path="url(#locus)">
+    <rect x="0" y="0" width="128" height="128" fill="url(#gb)"/>
+    <rect x="0" y="0" width="128" height="128" fill="url(#mag)"/>
+    <rect x="0" y="0" width="128" height="128" fill="url(#red)"/>
+    <rect x="0" y="0" width="128" height="128" fill="url(#white)"/>
+  </g>
+  <path d="M44.11,101.51 L44.08,101.52 L44.02,101.53 L43.95,101.53 L43.83,101.50 L43.57,101.32 L43.10,100.92 L42.29,100.25 L40.98,99.06 L40.09,98.06 L38.91,96.29 L37.40,93.42 L35.50,88.89 L33.14,82.17 L30.72,72.85 L28.44,61.22 L26.85,48.79 L26.41,37.29 L27.45,27.86 L30.05,21.76 L33.73,19.60 L37.88,20.35 L42.09,22.36 L46.06,24.76 L49.88,27.46 L53.64,30.42 L57.37,33.58 L61.08,36.89 L64.80,40.28 L68.50,43.73 L72.19,47.18 L75.80,50.59 L79.30,53.91 L82.66,57.09 L85.82,60.08 L88.70,62.82 L91.21,65.19 L93.41,67.27 L95.24,68.99 L96.73,70.41 L97.92,71.53 L98.86,72.42 L99.62,73.14 L100.26,73.75 L100.78,74.24 L101.19,74.63 L101.50,74.92 L101.92,75.32 L102.27,75.65 L102.41,75.78 Z" fill="none" stroke="#000000" stroke-opacity="0.25" stroke-width="1"/>
+  <!-- display gamut -->
+  <path d="M92.56,69.39 L57.20,42.71 L41.60,96.07 Z" fill="#ffffff" fill-opacity="0.12" stroke="#101010" stroke-opacity="0.55" stroke-width="6.5" stroke-linejoin="round"/>
+  <path d="M92.56,69.39 L57.20,42.71 L41.60,96.07 Z" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linejoin="round"/>
+  <circle cx="92.56" cy="69.39" r="5" fill="#101010" fill-opacity="0.55"/>
+  <circle cx="92.56" cy="69.39" r="3.4" fill="#ffffff"/>
+  <circle cx="57.20" cy="42.71" r="5" fill="#101010" fill-opacity="0.55"/>
+  <circle cx="57.20" cy="42.71" r="3.4" fill="#ffffff"/>
+  <circle cx="41.60" cy="96.07" r="5" fill="#101010" fill-opacity="0.55"/>
+  <circle cx="41.60" cy="96.07" r="3.4" fill="#ffffff"/>
+</svg>
