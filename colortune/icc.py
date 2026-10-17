@@ -2,7 +2,7 @@
 import struct
 import time
 
-from .colormath import D50_XYZ, SRGB, bradford, rgb_to_xyz_matrix, xy_to_XYZ
+from .colormath import D50_XYZ, SRGB, bradford, rgb_to_xyz_matrix
 
 
 def _s15(v):
@@ -32,10 +32,20 @@ def _vcgt_tag(ramps):
     return b"vcgt" + b"\0" * 4 + struct.pack(">IHHH", 0, 3, n, 2) + data
 
 
-def build_profile(description, primaries=None, gamma=2.2, ramps=None):
+def build_profile(description, primaries=None, gamma=2.2, ramps=None, gains=(1.0, 1.0, 1.0)):
+    """A matrix/TRC profile describing the display *after* the vcgt curves are loaded.
+
+    gamma is the calibration target the curves aim for; gains are the white-balance
+    gains baked into the curves, which move the white point, so the colorants are
+    scaled by them (in linear light) and the white is their sum.
+    """
     prim = primaries or SRGB
     m = rgb_to_xyz_matrix(prim)
-    white = xy_to_XYZ(*prim["w"])
+    lin = [max(g, 1e-3) ** gamma for g in gains]
+    m = tuple(tuple(m[i][c] * lin[c] for c in range(3)) for i in range(3))
+    white = tuple(sum(m[i]) for i in range(3))
+    white = tuple(v / white[1] for v in white)
+    m = tuple(tuple(v / sum(m[1]) for v in row) for row in m)
     adapt = bradford(white, D50_XYZ)
     cols = [tuple(sum(adapt[i][k] * m[k][c] for k in range(3)) for i in range(3)) for c in range(3)]
 

@@ -20,8 +20,8 @@ def label(text, *classes, xalign=0.0, wrap=False, selectable=False):
 
 
 def fmt(control, v):
-    if control.key == "backlight":
-        return f"{v:.0f}%"
+    if control.key in ("backlight", "saturation"):
+        return f"{v * (100 if control.key == 'saturation' else 1):.0f}%"
     if control.key == "black":
         return f"{v:+.3f}".replace("-", "−") if abs(v) > 1e-9 else "0"
     if control.digits == 0:
@@ -32,7 +32,7 @@ def fmt(control, v):
 class SliderRow(Adw.PreferencesRow):
     """One Control: name, value, reset-when-changed, a track that shows what it does."""
 
-    def __init__(self, control, on_change=None, show_tip=True):
+    def __init__(self, control, on_change=None, show_tip=True, focus_on_click=True):
         super().__init__(activatable=False, focusable=False)
         self.control = control
         self.on_change = on_change
@@ -55,10 +55,16 @@ class SliderRow(Adw.PreferencesRow):
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, control.minimum, control.maximum,
                                               control.step)
         self.scale.set_draw_value(False)
+        self.scale.set_focus_on_click(focus_on_click)
         self.scale.add_css_class("ct-track")
         self.scale.add_css_class(track_class(control.key))
         self.scale.update_property([Gtk.AccessibleProperty.LABEL], [control.label])
-        if control.default is not None and control.minimum < control.default < control.maximum:
+        if control.key == "saturation":
+            self.scale.add_mark(control.minimum, Gtk.PositionType.BOTTOM, "Grey")
+            self.scale.add_mark(1.0, Gtk.PositionType.BOTTOM, "Natural")
+            if control.maximum > 1:
+                self.scale.add_mark(control.maximum, Gtk.PositionType.BOTTOM, "Vivid")
+        elif control.default is not None and control.minimum < control.default < control.maximum:
             self.scale.add_mark(control.default, Gtk.PositionType.BOTTOM, None)
         self.scale.set_value(control.value)
         self.scale.connect("value-changed", self._changed)
@@ -78,9 +84,13 @@ class SliderRow(Adw.PreferencesRow):
         v = round(round(scale.get_value() / c.step) * c.step, max(c.digits, 0) + 3)
         if v == c.value:
             return
+        applied = c.setter(v)
+        if isinstance(applied, (int, float)) and abs(applied - v) > 1e-9:
+            v = applied  # the backend could only do this much (e.g. Ada's 10% steps)
+            c.value = v
+            self.scale.set_value(v)
         c.value = v
         self._show(v)
-        c.setter(v)
         if self.on_change:
             self.on_change(c)
 

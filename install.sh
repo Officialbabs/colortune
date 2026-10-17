@@ -23,8 +23,10 @@ if getent group i2c >/dev/null; then
     sudo usermod -aG i2c "$USER" && echo "   added $USER to group i2c (log out and back in)"
 fi
 
-echo "==> Installing launcher"
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+echo "==> Installing launcher and icon"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons"
+cp -r "$HERE/data/icons/hicolor" "$HOME/.local/share/icons/"
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -qtf "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 ln -sf "$HERE/bin/colortune" "$HOME/.local/bin/colortune"
 sed "s|@EXEC@|$HOME/.local/bin/colortune|" "$HERE/colortune.desktop.in" > "$HOME/.local/share/applications/colortune.desktop"
 

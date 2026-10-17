@@ -7,10 +7,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from ..backends import screenfilters  # noqa: E402
-from .widgets import SliderRow, label  # noqa: E402
+from .widgets import SliderRow, fmt, label  # noqa: E402
 
 # step id, title, short description, instructions, pattern
 GUIDE = [
@@ -39,6 +38,11 @@ GUIDE = [
      "Full-screen fields for spotting backlight bleed, IPS glow, tint shifts and dead pixels.\n"
      "Hide this panel (H) and use ←/→ to cycle colours.", "solid"),
 ]
+
+SATURATION_REDUCE_ONLY = (
+    "Look at the skin tones and the bright end of each gradient. If skin looks orange or colours look "
+    "harsh, lower Saturation until they look natural. If they already look natural, leave it at 100%.\n"
+    "This desktop can lower saturation but not raise it, and on a limited-gamut panel even 100% looks muted.")
 
 SOLIDS = [(0, 0, 0), (1, 1, 1), (0.5, 0.5, 0.5), (0.2, 0.2, 0.2), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
 
@@ -129,6 +133,9 @@ def p_grey(cr, w, h, scale=1.0, labels=True):
     cr.paint()
     x, rw = w * 0.04, w * 0.92
     _ramp(cr, x, h * 0.05, rw, h * 0.14, (1, 1, 1))
+    cr.set_source_rgb(0, 0, 0)  # backing, so the 50% step doesn't vanish into the background
+    cr.rectangle(x - 4, h * 0.21 - 4, rw + 8, h * 0.14 + 8)
+    cr.fill()
     _ramp(cr, x, h * 0.21, rw, h * 0.14, (1, 1, 1), steps=17)
     for i, rgb in enumerate([(1, 0, 0), (0, 1, 0), (0, 0, 1)]):
         _ramp(cr, x, h * (0.37 + i * 0.07), rw, h * 0.06, rgb, steps=32)
@@ -195,115 +202,197 @@ def thumbnail(kind, width=232, height=130):
 
 # ---------------------------------------------------------------- window
 
-class PatternWindow(Gtk.Window):
+class PatternWindow(Adw.Window):
+    """Full-screen pattern with a docked panel below it, so nothing being judged is covered.
+
+    Keys: ←/→ step (or cycle colours), ↑/↓ adjust this step's main setting (works with the
+    panel hidden), H hide the panel, Esc close.
+    """
+
     def __init__(self, app, controls, on_change=None, start="black", solid=None, message=None,
-                 single=False):
+                 single=False, monitor=None, internal=False, night=None, on_pause=None):
         super().__init__(application=app, title="ColorTune patterns")
         self.set_default_size(1280, 800)
         self.controls = controls
         self.on_change = on_change
         self.step = next((i for i, g in enumerate(GUIDE) if g[0] == start), 0)
         self.single = single
+        self.internal = internal
+        self.night = night
+        self.on_pause = on_pause
         self.solid_idx = 0
         self.solid = solid
         self.message = message
+        self.rows = []
 
-        overlay = Gtk.Overlay()
         self.area = Gtk.DrawingArea(hexpand=True, vexpand=True)
         self.area.set_draw_func(self._draw)
-        overlay.set_child(self.area)
-        self.panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                             halign=Gtk.Align.CENTER, valign=Gtk.Align.END, margin_bottom=28,
-                             margin_start=16, margin_end=16)
-        self.panel.add_css_class("ct-panel")
-        self.panel.set_size_request(820, -1)
-        overlay.add_overlay(self.panel)
-        self.set_child(overlay)
+        self.osd = label("", "ct-osd", xalign=0.5)
+        self.osd.set_halign(Gtk.Align.CENTER)
+        self.osd.set_valign(Gtk.Align.START)
+        self.osd.set_margin_top(24)
+        self.osd.set_visible(False)
+        self._osd_timer = 0
+        stage = Gtk.Overlay(child=self.area)
+        stage.add_overlay(self.osd)
+
+        # panel = [scrollable: instructions | controls] above a fixed row of keys + Back/Next
+        self.panel = Gtk.Box(spacing=28)
+        self.left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, hexpand=True)
+        self.right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.END)
+        self.right.set_size_request(360, -1)
+        self.panel.append(self.left)
+        self.panel.append(self.right)
+        self.scroll = Gtk.ScrolledWindow(child=self.panel, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                         propagate_natural_height=True)
+        self.navbar = Gtk.Box(spacing=8)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.add_css_class("ct-panel")
+        card.append(self.scroll)
+        card.append(self.navbar)
+        self.dock = Adw.Clamp(maximum_size=1180, child=card, margin_top=12, margin_bottom=14,
+                              margin_start=14, margin_end=14)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.add_css_class("ct-pattern-dock")
+        root.append(stage)
+        root.append(self.dock)
+        self.set_content(root)
+
+        # libadwaita applies only the last matching breakpoint, hence the combined one.
+        def narrow(bp):
+            bp.add_setter(self.panel, "orientation", Gtk.Orientation.VERTICAL)
+            bp.add_setter(self.right, "valign", Gtk.Align.FILL)
+
+        def short(bp):  # keep most of a short screen for the pattern
+            bp.add_setter(self.scroll, "max-content-height", 200)
+        for cond, setters in (("max-width: 900sp", (narrow,)), ("max-height: 700sp", (short,)),
+                              ("max-width: 900sp and max-height: 700sp", (narrow, short))):
+            bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse(cond))
+            for fn in setters:
+                fn(bp)
+            self.add_breakpoint(bp)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._key)
         self.add_controller(keys)
         click = Gtk.GestureClick()
-        click.connect("pressed", lambda *a: self.panel.set_visible(True))
+        click.connect("pressed", lambda *a: self._show_panel(True))
         self.area.add_controller(click)
         self._build_panel()
-        self.fullscreen()
+        if monitor is not None:
+            self.fullscreen_on_monitor(monitor)
+        else:
+            self.fullscreen()
+
+    # ------------------------------------------------------------ panel
+    def _clear(self, box):
+        while (c := box.get_first_child()):
+            box.remove(c)
 
     def _build_panel(self):
-        while (c := self.panel.get_first_child()):
-            self.panel.remove(c)
+        self._clear(self.left)
+        self._clear(self.right)
+        self._clear(self.navbar)
+        self.rows = []
         if self.solid is not None:
             self.status = label(self.message or "", "ct-panel-title", wrap=True)
-            self.panel.append(self.status)
-            self.panel.append(label("Esc cancels", "ct-tip"))
+            self.left.append(self.status)
+            self.left.append(label("Esc cancels", "ct-tip"))
+            self.right.set_visible(False)
+            self.navbar.set_visible(False)
             return
         sid, title, _short, text, _ = GUIDE[self.step]
+        relevant = [c for c in self.controls if sid in c.steps]
 
         head = Gtk.Box(spacing=12)
         t = label(title, "ct-panel-title")
-        t.set_hexpand(True)
         head.append(t)
+        if not relevant and sid != "uniformity":
+            head.append(label("LOOK ONLY", "ct-overline", xalign=0))
+        spacer = Gtk.Box(hexpand=True)
+        head.append(spacer)
         if not self.single:
             dots = Gtk.Box(spacing=5, valign=Gtk.Align.CENTER)
-            for i in range(len(GUIDE)):
+            for i, g in enumerate(GUIDE):
                 d = Gtk.Box()
                 d.add_css_class("ct-dot")
                 if i == self.step:
                     d.add_css_class("active")
+                elif not any(g[0] in c.steps for c in self.controls) and g[0] != "uniformity":
+                    d.add_css_class("look")
                 dots.append(d)
             head.append(dots)
-        self.panel.append(head)
-        self.panel.append(label(text, wrap=True))
+        self.left.append(head)
+        if sid == "saturation" and relevant and relevant[0].maximum <= 1:
+            text = SATURATION_REDUCE_ONLY
+        self.left.append(label(text, wrap=True))
 
-        nl = screenfilters.night_light()
-        if nl:
+        if self.night:
             warn = Gtk.Box(spacing=10)
             warn.add_css_class("ct-warn")
-            msg = label(f"{nl['detail']}, so colours here look warmer than they are.", wrap=True)
+            warn.append(Gtk.Image(icon_name="weather-clear-night-symbolic"))
+            msg = label(f"{self.night['short']}. Colours here look warmer than they are.", wrap=True)
             msg.set_hexpand(True)
             warn.append(msg)
-            if nl["can_pause"]:
-                b = Gtk.Button(label="Pause it", valign=Gtk.Align.CENTER)
-                b.connect("clicked", lambda *_: (screenfilters.pause_night_light(), self._build_panel()))
+            if self.night.get("can_pause") and self.on_pause:
+                b = Gtk.Button(label="Pause Night Light", valign=Gtk.Align.CENTER)
+                b.connect("clicked", self._pause)
                 warn.append(b)
-            self.panel.append(warn)
+            self.left.append(warn)
 
-        relevant = [c for c in self.controls if sid in c.steps]
         if relevant:
-            cols = Gtk.Box(spacing=12, homogeneous=len(relevant) > 1)
-            lists = [Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE) for _ in range(min(2, len(relevant)))]
-            for lb in lists:
-                lb.add_css_class("boxed-list")
-                lb.set_valign(Gtk.Align.START)
-                lb.set_hexpand(True)
-                cols.append(lb)
-            for i, c in enumerate(relevant):
-                lists[i % len(lists)].append(SliderRow(c, self.on_change, show_tip=False))
-            self.panel.append(cols)
+            lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+            lb.add_css_class("boxed-list")
+            for c in relevant:
+                row = SliderRow(c, self.on_change, show_tip=False, focus_on_click=False)
+                self.rows.append(row)
+                lb.append(row)
+            self.right.append(lb)
         elif sid != "uniformity":
-            self.panel.append(label("Nothing on this display can adjust this from software. Use the "
-                                    "monitor's own menu while you look at the pattern.", "ct-tip", wrap=True))
+            if self.internal:
+                why = ("This can't be changed from software here. You can still check it, and a colorimeter "
+                       "(Measure page) can tell you how far off it is.")
+            else:
+                why = "Nothing on this display can adjust this from software. Use the monitor's own menu while you look."
+            self.right.append(label(why, "ct-tip", wrap=True))
 
-        nav = Gtk.Box(spacing=8)
-        hint = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-        for key, what in (("←→", "steps"), ("H", "hide"), ("Esc", "close")):
-            if self.single and key == "←→":
-                continue
+        nav = self.navbar
+        hint = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER, hexpand=True)
+        keys = [("H", "hide"), ("Esc", "close")]
+        if relevant:
+            keys.insert(0, ("↑↓", "adjust"))
+        if not self.single:
+            keys.insert(0, ("←→", "step"))
+        for key, what in keys:
             hint.append(label(key, "ct-key"))
             hint.append(label(what, "ct-tip"))
-        hint.set_hexpand(True)
         nav.append(hint)
         if not self.single:
-            prev = Gtk.Button(label="Back")
+            prev = Gtk.Button(label="Back", focus_on_click=False)
             prev.set_sensitive(self.step > 0)
             prev.connect("clicked", lambda *_: self.go(-1))
             nav.append(prev)
         last = self.single or self.step == len(GUIDE) - 1
-        nxt = Gtk.Button(label="Done" if last else "Next")
+        nxt = Gtk.Button(label="Done" if last else "Next", focus_on_click=False)
         nxt.add_css_class("suggested-action")
         nxt.connect("clicked", lambda *_: self.close() if last else self.go(1))
         nav.append(nxt)
-        self.panel.append(nav)
+        self.right.set_visible(bool(self.right.get_first_child()))
+        nav.set_visible(True)
+        GLib.idle_add(self._unfocus)
+
+    def _unfocus(self):
+        self.set_focus(None)  # arrow keys belong to the window until a slider is clicked
+        return False
+
+    def _pause(self, *_):
+        if self.on_pause and self.on_pause():
+            self.night = None
+            self._build_panel()
+
+    def _show_panel(self, show):
+        self.dock.set_visible(show)
+        self.area.queue_draw()
 
     def set_message(self, text):
         if self.solid is not None:
@@ -314,19 +403,41 @@ class PatternWindow(Gtk.Window):
         self._build_panel()
         self.area.queue_draw()
 
+    def _nudge(self, direction):
+        """↑/↓: move this step's first setting by one step, with an on-screen readout."""
+        if not self.rows:
+            return
+        row = self.rows[0]
+        c = row.control
+        row.scale.set_value(min(c.maximum, max(c.minimum, c.value + direction * c.step)))
+        self.osd.set_text(f"{c.label}  {fmt(c, c.value)}")
+        self.osd.set_visible(True)
+        if self._osd_timer:
+            GLib.source_remove(self._osd_timer)
+        self._osd_timer = GLib.timeout_add(1200, self._hide_osd)
+
+    def _hide_osd(self):
+        self._osd_timer = 0
+        self.osd.set_visible(False)
+        return False
+
     def _key(self, ctrl, keyval, code, state):
         if keyval == Gdk.KEY_Escape:
             self.close()
             return True
         if keyval in (Gdk.KEY_h, Gdk.KEY_H):
-            self.panel.set_visible(not self.panel.get_visible())
+            self._show_panel(not self.dock.get_visible())
             return True
-        if self.solid is not None or keyval not in (Gdk.KEY_Left, Gdk.KEY_Right):
+        if self.solid is not None:
             return False
-        if isinstance(self.get_focus(), Gtk.Range) and self.panel.get_visible():
-            return False  # arrows belong to the focused slider
+        focused_range = isinstance(self.get_focus(), Gtk.Range) and self.dock.get_visible()
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_Down) and not focused_range:
+            self._nudge(1 if keyval == Gdk.KEY_Up else -1)
+            return True
+        if keyval not in (Gdk.KEY_Left, Gdk.KEY_Right) or focused_range:
+            return False
         delta = 1 if keyval == Gdk.KEY_Right else -1
-        if GUIDE[self.step][4] == "solid":
+        if GUIDE[self.step][4] == "solid" and (self.single or not self.dock.get_visible()):
             self.solid_idx = (self.solid_idx + delta) % len(SOLIDS)
             self.area.queue_draw()
         elif not self.single:
@@ -350,3 +461,14 @@ class PatternWindow(Gtk.Window):
             p_solid(cr, w, h, index=self.solid_idx)
         else:
             PATTERNS[kind](cr, w, h, self._device_scale(), True)
+
+
+def monitor_for(connector):
+    """The Gdk.Monitor showing a DRM connector, so patterns open on the right screen."""
+    display = Gdk.Display.get_default()
+    monitors = display.get_monitors() if display else None
+    for i in range(monitors.get_n_items() if monitors else 0):
+        m = monitors.get_item(i)
+        if m.get_connector() == connector:
+            return m
+    return None

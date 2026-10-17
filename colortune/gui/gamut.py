@@ -66,9 +66,9 @@ class GamutDiagram(Gtk.DrawingArea):
             cr.move_to(ya[0], round(ya[1]) + .5)
             cr.line_to(yb[0], round(yb[1]) + .5)
         cr.stroke()
-        cr.set_source_rgba(1, 1, 1, 0.35)
+        cr.set_source_rgba(1, 1, 1, 0.6)
         cr.select_font_face("Sans")
-        cr.set_font_size(9)
+        cr.set_font_size(10)
         for v in (0, 2, 4, 6, 8):
             x, y = pt(v / 10, 0)
             cr.move_to(x - 6, y + 14)
@@ -139,8 +139,9 @@ class GamutDiagram(Gtk.DrawingArea):
 
 
 def legend():
-    """Small key matching the diagram's line styles."""
-    box = Gtk.Box(spacing=14, halign=Gtk.Align.CENTER)
+    """Small key matching the diagram's line styles (wraps on narrow windows)."""
+    box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=4, min_children_per_line=2,
+                      column_spacing=14, row_spacing=4, halign=Gtk.Align.CENTER, homogeneous=False)
     for text, style in (("This display", "panel"), ("sRGB", "srgb"), ("Display P3", "p3"), ("D65 white", "d65")):
         sw = Gtk.DrawingArea(content_width=22, content_height=10)
 

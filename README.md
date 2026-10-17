@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" alt="ColorTune icon"></p>
+
 # ColorTune
 
 Calibrate blacks, gamma, white balance and saturation on any Linux desktop.
@@ -35,12 +37,27 @@ bin/colortune
 
 The app has five pages: **Overview** (your display's colour range plotted against sRGB and Display P3, and what can be adjusted), **Adjust**, **Check** (test patterns), **Measure** (colorimeter) and **Profiles**. The interface is neutral grey on purpose, because coloured interfaces change how you judge white.
 
-1. If Night Light is on, pause it from the banner. It warms the screen and throws off every judgement.
-2. Run **Guided calibration**. You'll step through full-screen patterns: black level → white level → gamma → white balance → saturation → uniformity. Each step shows only the sliders that matter for it. Use **H** to hide the panel and **Esc** to close.
-3. Save the result as a profile (for example *Movies*, *Night* or *Photo editing*).
-4. Turn on **Apply at login** on the Profiles page.
+1. If Night Light is on, pause it from the banner. It warms the screen and throws off every judgement. ColorTune turns it back on when you close the app, unless you or the schedule changed it in the meantime.
+2. Run **Guided calibration**. You'll step through full-screen patterns: black level → white level → gamma → white balance → saturation → uniformity. Each step shows only the controls that matter for it, in a panel below the pattern so nothing you're judging is covered. Steps marked *Look only* can't be changed from software on your setup.
 
-If you have a colorimeter, the **Measure** page measures white and black luminance, contrast ratio and colour temperature. **Auto white balance** adjusts the RGB gains in a loop until white hits D65.
+   | Key | Action |
+   |---|---|
+   | ← → | Previous / next step (or colour, on Uniformity) |
+   | ↑ ↓ | Adjust this step's setting, with an on-screen readout. Works with the panel hidden |
+   | H | Hide the panel |
+   | Esc | Close |
+3. Save the result as a profile (for example *Movies*, *Night* or *Photo editing*). The built-in **Accurate** profile puts everything back to neutral.
+4. Turn on **Apply at login** on the Profiles page. This re-applies your settings but leaves the backlight where it is.
+
+If you have a colorimeter, the **Measure** page detects it, lets you pick the screen type (backlight technology) for more accurate readings, and measures white and black luminance, contrast ratio and colour temperature. **Auto white balance** adjusts the RGB gains in a loop until white hits D65. Press Esc to cancel; the gains are put back.
+
+### Doing no harm
+
+- **Displays you never adjust are left alone.** ColorTune doesn't replace DisplayCAL curves or desktop profiles on screens you haven't touched.
+- **Reset and Accurate put back what was there before.** That means the previous X11 gamma ramps, or the previous colord or KDE profile.
+- **The monitor's colour mode** (sRGB / User…) only changes when you pick one on the Adjust page. RGB gains usually only work in *User* mode.
+- **On GNOME and KDE the profile also drives colour management**, so by default it describes the screen as sRGB with your curves applied (*Curves only*). That means colours look as they did before. *Display's reported colours* uses the screen's EDID instead, but only if that data passes a sanity check.
+- **On Ada, the saturation slider only uses the colour filter when the filter is off or ColorTune turned it on.** Your own filter choice is put back when saturation returns to 100%, and an accessibility filter you turned on yourself is never touched. The filter covers the whole desktop, so saturation is one setting for all screens.
 
 ### Command line
 
@@ -66,6 +83,7 @@ colortune reset
 - `~/.config/colortune/state.json`: current settings per display. Keys follow the monitor's EDID, so settings move with the monitor across ports.
 - `~/.config/colortune/profiles.json`: saved profiles.
 - `~/.local/share/colortune/profiles/*.icc`: generated ICC profiles (on GNOME and KDE).
+- `COLORTUNE_SPOTREAD_ARGS`: extra arguments for ArgyllCMS `spotread`, e.g. a `-X file.ccss` correction.
 
 ## Tests
 

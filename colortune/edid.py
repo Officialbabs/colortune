@@ -57,3 +57,23 @@ def pretty_name(info: dict, connector: str) -> str:
     if info.get("name") and info.get("text") and info["text"] not in model:
         model = f"{model} ({info['text']})"
     return f"{model} — {connector}"
+
+
+def validate_primaries(prim):
+    """None if the reported chromaticities are plausible, else a short reason.
+
+    Cheap panels often ship EDIDs with placeholder or garbage colour data; a profile
+    built from it would mislead every colour-managed app.
+    """
+    if not prim:
+        return "no colour data"
+    (rx, ry), (gx, gy), (bx, by), (wx, wy) = prim["r"], prim["g"], prim["b"], prim["w"]
+    if not (rx > 0.45 and ry < 0.40 and gy > 0.45 and by < 0.20 and bx < 0.25):
+        return "the red, green and blue points are in impossible places"
+    if not (0.28 <= wx <= 0.36 and 0.28 <= wy <= 0.38):
+        return "the white point is far from any normal white"
+    area = abs((gx - rx) * (by - ry) - (bx - rx) * (gy - ry)) / 2
+    srgb_area = 0.1121  # sRGB triangle in xy
+    if not (0.25 <= area / srgb_area <= 2.2):
+        return "the colour range is implausibly small or large"
+    return None

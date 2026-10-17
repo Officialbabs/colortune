@@ -113,6 +113,7 @@ class GammaClient(Wayland):
 
     def __init__(self):
         self.outputs = {}        # global name -> dict(id, name, gamma, size, failed)
+        self.last = {}           # output name -> Picture, re-applied when a monitor is replugged
         self.manager = None
         self.xdg_manager = None
         super().__init__()
@@ -142,16 +143,20 @@ class GammaClient(Wayland):
         o = {"name": None, "gamma": None, "size": 0, "failed": False, "pending": None}
         self.outputs[gname] = o
 
+        def named(name):
+            o["name"] = name
+            pic = self.last.get(name)
+            if pic is not None and o["pending"] is None and self.manager:
+                self.set_picture(name, pic)
+
         def on_output(op, body):
             if op == 4:  # wl_output.name (v4)
-                o["name"] = _read_str(body, 0)[0]
-            elif op == 2 and o["gamma"] is None and self.manager:  # done
-                self._get_gamma(o)
+                named(_read_str(body, 0)[0])
         o["id"] = self.bind(gname, "wl_output", min(ver, 4), on_output)
         if ver < 4 and self.xdg_manager:
             def on_xdg(op, body):
                 if op == 3:
-                    o["name"] = _read_str(body, 0)[0]
+                    named(_read_str(body, 0)[0])
             xid = self.new_id(on_xdg)
             self.send(self.xdg_manager, 1, struct.pack("<II", xid, o["id"]))
 
@@ -170,10 +175,23 @@ class GammaClient(Wayland):
         return next((o for o in self.outputs.values() if o["name"] == name), None)
 
     def set_picture(self, output, picture: Picture):
+        self.last[output] = picture
         o = self.by_name(output)
         if not o:
             return f"unknown output {output}"
         o["pending"] = picture
+        if picture.lut_identity():
+            # Neutral: let go of the output so the compositor restores its own ramps
+            # and other tools (gammastep, wlsunset...) can use gamma control again.
+            if o["gamma"] is not None:
+                self.send(o["gamma"], 1)
+                self.handlers.pop(o["gamma"], None)
+            o.update(gamma=None, size=0, failed=False)
+            return None
+        if o["gamma"] is None and self.manager:
+            o["failed"] = False
+            self._get_gamma(o)
+            return None  # applied once gamma_size arrives
         if o["failed"]:
             return "compositor refused gamma control (another app such as gammastep/wlsunset may own it)"
         if not o["size"]:
@@ -209,6 +227,7 @@ def serve(initial):
     client = GammaClient()
     if not client.supported:
         raise SystemExit("compositor does not support wlr-gamma-control")
+    client.roundtrip()
     for name, pic in initial.items():
         client.set_picture(name, pic)
     client.roundtrip()

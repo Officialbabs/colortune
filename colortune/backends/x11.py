@@ -60,6 +60,8 @@ class XRandRGamma:
         self.r.XRRAllocGamma.argtypes = [ctypes.c_int]
         self.r.XRRSetCrtcGamma.argtypes = [ctypes.c_void_p, _ul, ctypes.POINTER(_Gamma)]
         self.r.XRRFreeGamma.argtypes = [ctypes.POINTER(_Gamma)]
+        self.r.XRRGetCrtcGamma.restype = ctypes.POINTER(_Gamma)
+        self.r.XRRGetCrtcGamma.argtypes = [ctypes.c_void_p, _ul]
         self.dpy = self.x.XOpenDisplay(None)
         if not self.dpy:
             raise RuntimeError("cannot open X display")
@@ -82,6 +84,20 @@ class XRandRGamma:
     def gamma_size(self, output):
         crtc = self._crtcs().get(output)
         return self.r.XRRGetCrtcGammaSize(self.dpy, crtc) if crtc else 0
+
+    def get_ramps(self, output):
+        """Current ramps (e.g. loaded by DisplayCAL/xcalib), so they can be restored."""
+        crtc = self._crtcs().get(output)
+        if not crtc:
+            return None
+        g = self.r.XRRGetCrtcGamma(self.dpy, crtc)
+        if not g:
+            return None
+        n = g.contents.size
+        out = [[g.contents.red[i] for i in range(n)], [g.contents.green[i] for i in range(n)],
+               [g.contents.blue[i] for i in range(n)]]
+        self.r.XRRFreeGamma(g)
+        return out
 
     def set_ramps(self, output, ramps_u16):
         crtc = self._crtcs().get(output)

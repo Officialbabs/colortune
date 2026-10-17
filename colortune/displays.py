@@ -5,10 +5,12 @@ import subprocess
 import sys
 import time
 
+from . import config
 from . import edid as edidmod
 from .backends import WORKER, Control, backlight, ddc, icc, screenfilters, wlr, x11
 from .colormath import DISPLAY_P3, srgb_coverage
 from .config import DAEMON_SOCKET
+from .edid import validate_primaries
 from .lut import Picture, ramps_u16
 
 STEPS = {
@@ -43,10 +45,11 @@ class Environment:
         self.nvidia = x11.nvidia_available() and self.x11 is not None
         self.ddc = ddc.available()
         self.ada = screenfilters.ada_available()
+        self.displays = []
         self.refresh_night_light()
 
     def refresh_night_light(self):
-        self.night_light = screenfilters.night_light()
+        self.night_light = screenfilters.night_light(gamma_tools=bool(self.x11 or self.wlr))
         return self.night_light
 
     @property
@@ -87,6 +90,8 @@ class Display:
         self.lut = None
         self.matrix = None
         self.filter = None       # desktop colour filter used for saturation (Ada)
+        self.profile_mode = "curves"
+        self.ddc_preset = None
         self.last_error = None
 
     # ------------------------------------------------------------ setup
@@ -101,6 +106,8 @@ class Display:
                 self.ddc_bus = d["bus"]
         if self.ddc_bus is not None and probe_ddc:
             self.ddc_features = ddc.probe(self.ddc_bus)
+            if any(c in self.ddc_features for c in (0x16, 0x18, 0x1A)):
+                self.ddc_preset = ddc.get_preset(self.ddc_bus)
 
         if env.x11:
             names = env.x11.outputs()
@@ -121,12 +128,19 @@ class Display:
     def load(self, st, from_profile=False):
         if st:
             self.picture = Picture.from_dict(st.get("picture"))
-            self.hardware = {k: float(v) for k, v in st.get("hardware", {}).items()}
-        if self.filter == "ada" and not from_profile:  # the desktop's own setting is the truth
-            self.picture.saturation = round(screenfilters.ada_get_saturation(), 2)
+            self.hardware = {k: float(v) for k, v in st.get("hardware", {}).items()
+                             if not k.startswith("_")}
+            self.profile_mode = st.get("profile_mode", self.profile_mode)
+        if not from_profile:
+            # The live system is the truth for things other tools also change.
+            if self.backlight:
+                self.hardware["backlight"] = self.backlight.get_percent()
+            if self.filter == "ada":
+                self.picture.saturation = screenfilters.ada_get_saturation()
 
     def to_state(self):
-        return {"name": self.name, "picture": self.picture.to_dict(), "hardware": self.hardware}
+        return {"name": self.name, "picture": self.picture.to_dict(), "hardware": self.hardware,
+                "profile_mode": self.profile_mode}
 
     # ------------------------------------------------------------ info
     def gamut(self):
@@ -137,6 +151,13 @@ class Display:
         prim = self.edid.get("primaries")
         return srgb_coverage(prim, DISPLAY_P3)[0] if prim else None
 
+    def edid_problem(self):
+        """Why the display's own colour data can't be trusted, or None."""
+        return validate_primaries(self.edid.get("primaries")) if self.edid else "no display data"
+
+    def ada_saturation_status(self):
+        return screenfilters.ada_saturation_status() if self.filter == "ada" else None
+
     def saturation_method(self):
         if self.matrix == "nvidia":
             return "NVIDIA digital vibrance"
@@ -145,9 +166,9 @@ class Display:
         if 0x8A in self.ddc_features:
             return "Monitor saturation (DDC/CI)"
         if self.filter == "ada":
-            return ("Ada colour filter — can lower saturation, not raise it"
-                    if screenfilters.ada_saturation_usable()
-                    else "Ada colour filter is in use for another filter (Settings → Colour filters)")
+            if self.ada_saturation_status() == "theirs":
+                return "Ada's colour filter is already in use. Turn it off in Settings → Colour filters to use this"
+            return "Ada colour filter: can lower saturation, not raise it"
         return None
 
     def methods(self):
@@ -165,9 +186,9 @@ class Display:
                 detail = f"i2c-{self.ddc_bus}: " + (", ".join(ddc.FEATURES[c][0] for c in self.ddc_features) or "no adjustable features")
             rows.append(("Monitor controls (DDC/CI)", self.ddc_bus is not None and bool(self.ddc_features), detail))
         rows.append(("Picture curves", self.lut is not None,
-                     LUT_LABELS.get(self.lut, "this compositor does not let apps change gamma")))
+                     LUT_LABELS.get(self.lut, "this desktop doesn't let apps change colour curves")))
         sat = self.saturation_method()
-        rows.append(("Saturation", sat is not None and "in use" not in sat,
+        rows.append(("Saturation", sat is not None and self.ada_saturation_status() != "theirs",
                      sat or "needs X11 with a colour-matrix driver, NVIDIA, or a monitor with DDC saturation"))
         return rows
 
@@ -175,8 +196,7 @@ class Display:
     def controls(self):
         cs = []
         if self.backlight:
-            cs.append(Control("backlight", "Backlight", "hardware", 1, 100,
-                              self.hardware.get("backlight", self.backlight.get_percent()),
+            cs.append(Control("backlight", "Backlight", "hardware", 1, 100, self.backlight.get_percent(),
                               self._set_backlight, step=1, default=None, steps=("black", "white"),
                               tip="Lower backlight = deeper blacks on LCD (and less glow)", source="backlight"))
         for code, (cur, mx) in self.ddc_features.items():
@@ -189,20 +209,21 @@ class Display:
         if self.lut:
             spec += [
                 ("black", "Black point", -0.10, 0.10, 0.005, 3, ("black",),
-                 "Negative crushes the faint grey glow for deeper blacks; positive reveals shadow detail"),
-                ("gamma", "Gamma", 0.6, 1.6, 0.01, 2, ("gamma",), ">1 brighter midtones, <1 deeper, punchier"),
+                 "Below 0 hides the faint grey glow for deeper blacks; above 0 reveals shadow detail"),
+                ("gamma", "Gamma", 0.6, 1.6, 0.01, 2, ("gamma",), "Above 1 brightens mid-tones, below 1 deepens them"),
                 ("contrast", "Contrast", 0.85, 1.25, 0.01, 2, ("white",), ""),
                 ("brightness", "White level", 0.5, 1.0, 0.01, 2, ("white",), "Dims whites without touching the backlight"),
-                ("red", "Red", 0.5, 1.0, 0.005, 3, ("white_balance",), "Lower the channel that tints greys"),
+                ("red", "Red", 0.5, 1.0, 0.005, 3, ("white_balance",), "Lower the colour that tints your greys"),
                 ("green", "Green", 0.5, 1.0, 0.005, 3, ("white_balance",), ""),
                 ("blue", "Blue", 0.5, 1.0, 0.005, 3, ("white_balance",), ""),
             ]
         if self.matrix:
             spec.append(("saturation", "Saturation", 0.0, 2.0, 0.01, 2, ("saturation",),
-                         "1.00 is neutral. Above it is punchier but less accurate"))
-        elif self.filter == "ada" and screenfilters.ada_saturation_usable():
-            spec.append(("saturation", "Saturation", 0.0, 1.0, 0.01, 2, ("saturation",),
-                         "1.00 leaves colours untouched. Lower mutes them; Ada can't boost saturation"))
+                         "100% is natural. Higher is punchier but less accurate"))
+        elif self.filter == "ada" and self.ada_saturation_status() != "theirs":
+            spec.append(("saturation", "Saturation", 0.0, 1.0, 0.1, 1, ("saturation",),
+                         "100% leaves colours untouched. Lower mutes them. Ada can lower saturation "
+                         "but not raise it"))
         for key, label, lo, hi, step, digits, steps, tip in spec:
             cs.append(Control(key, label, "picture", lo, hi, getattr(self.picture, key),
                               lambda v, k=key: self._set_picture(k, v), step=step, digits=digits,
@@ -217,28 +238,61 @@ class Display:
 
     def _set_vcp(self, code, v):
         self.hardware[f"vcp{code:02X}"] = v
-        if code in (0x16, 0x18, 0x1A) and not self.hardware.get("_user_preset"):
-            self.hardware["_user_preset"] = 1
-            WORKER.submit(f"{self.key}:preset", lambda _: ddc.select_user_preset(self.ddc_bus), 0)
         WORKER.submit(f"{self.key}:vcp{code:02X}", lambda val: ddc.set_vcp(self.ddc_bus, code, val), v)
 
+    def set_preset(self, code):
+        """Monitor colour mode. RGB gains usually only work in 'User'; sRGB is the
+        monitor's own accurate mode. Only changed when the user asks."""
+        self.ddc_preset = code
+        WORKER.submit(f"{self.key}:preset", lambda c: ddc.set_preset(self.ddc_bus, c), code)
+
     def _set_picture(self, key, v):
-        setattr(self.picture, key, float(v))
         if key == "saturation" and not self.matrix and self.filter == "ada":
-            WORKER.submit("ada:saturation", screenfilters.ada_set_saturation, float(v))
-            return
+            v = screenfilters.snap_saturation(v)
+            for d in self.env.displays:  # one filter for the whole desktop
+                if d.filter == "ada":
+                    d.picture.saturation = v
+            WORKER.submit("ada:saturation", self._apply_ada_now, v)
+            return v
+        setattr(self.picture, key, float(v))
         self.apply_picture()
+        return v
+
+    def _apply_ada_now(self, v):
+        if screenfilters.ada_set_saturation(v) is None:
+            self.last_error = ("Saturation not changed: Ada's colour filter is in use for another filter "
+                               "(Settings → Colour filters)")
+        else:
+            self.last_error = None
 
     def apply_picture(self):
         pic = Picture.from_dict(self.picture.to_dict())
         WORKER.submit(f"{self.key}:picture", self._apply_picture_now, pic)
 
-    def _apply_picture_now(self, pic):
+    def _x11_backup(self):
+        """Remember the ramps that were loaded before our first change (DisplayCAL, xcalib...)."""
+        def update(state):
+            orig = state.setdefault("x11_original", {})
+            if self.key not in orig:
+                orig[self.key] = self.env.x11.get_ramps(self.x11_name)
+        config.update_state(update)
+
+    def _apply_picture_now(self, pic, restore=False):
         err = None
         if self.lut == "x11":
-            size = self.env.x11.gamma_size(self.x11_name)
-            if size:
-                self.env.x11.set_ramps(self.x11_name, ramps_u16(pic, size))
+            if restore or pic.lut_identity():
+                # Neutral curves = whatever was loaded before ColorTune (DisplayCAL, xcalib...).
+                # No backup means ColorTune never changed the ramps: leave them alone.
+                orig = config.load_state().get("x11_original", {}).get(self.key)
+                size = self.env.x11.gamma_size(self.x11_name)
+                if orig and size and len(orig[0]) == size:
+                    self.env.x11.set_ramps(self.x11_name, orig)
+                config.update_state(lambda st: st.get("x11_original", {}).pop(self.key, None))
+            else:
+                self._x11_backup()
+                size = self.env.x11.gamma_size(self.x11_name)
+                if size:
+                    self.env.x11.set_ramps(self.x11_name, ramps_u16(pic, size))
             if self.matrix == "ctm":
                 from .lut import ctm
                 x11.set_ctm(self.x11_name, ctm(pic))
@@ -247,32 +301,72 @@ class Display:
         elif self.lut == "wlr":
             msg = {"output": self.connector, "picture": pic.to_dict()}
             reply = wlr.send(msg)
-            if reply is None:
+            if reply is None and not pic.lut_identity():
                 ensure_daemon()
                 reply = wlr.send(msg)
-            err = (reply or {}).get("error") if reply else "could not reach the colortune daemon"
+            err = (reply or {}).get("error") if reply else None
+            if reply is None and not pic.lut_identity():
+                err = "could not reach the colortune daemon"
         elif self.lut == "icc":
-            err = icc.apply(self, pic)
+            err = icc.restore(self) if restore else icc.apply(self, pic, self.profile_mode)
         self.last_error = err
         if err:
             print(f"colortune: {self.connector}: {err}")
 
-    def apply_all(self, picture=True):
-        """Re-apply everything stored (used at login)."""
+    def picture_changed(self):
+        return not self.picture.lut_identity() or (bool(self.matrix) and self.picture.saturation != 1.0)
+
+    def set_profile_mode(self, mode):
+        self.profile_mode = mode
+        if self.lut == "icc" and self.picture_changed():
+            self.apply_picture()
+
+    def apply_all(self, picture=True, backlight=True, force=False):
+        """Re-apply what is stored. Displays the user never adjusted are left alone,
+        so calibration from other tools (DisplayCAL, desktop profiles) survives.
+        force (profiles): a neutral picture actively puts back what was there before.
+        Ada saturation is desktop-wide: see apply_desktop_saturation()."""
         for c in self.controls():
-            if c.group == "hardware" and (c.key in self.hardware):
+            if c.group == "hardware" and c.key in self.hardware and (backlight or c.key != "backlight"):
                 c.setter(self.hardware[c.key])
         if self.lut and picture:
-            self.apply_picture()
-        if self.filter == "ada" and not self.matrix and screenfilters.ada_saturation_usable():
-            WORKER.submit("ada:saturation", screenfilters.ada_set_saturation, self.picture.saturation)
+            if self.picture_changed():
+                self.apply_picture()
+            elif force and self.touched():
+                self._queue_restore()
+
+    def touched(self):
+        """Has ColorTune changed this display's curves or profile (now or in a backup)?"""
+        st = config.load_state()
+        return (self.picture_changed() or self.key in st.get("x11_original", {})
+                or self.key in st.get("icc_previous", {}) or self.lut == "wlr")
+
+    def _queue_restore(self):
+        WORKER.submit(f"{self.key}:picture", lambda p: self._apply_picture_now(p, restore=True), Picture())
 
     def reset(self):
+        """Back to how the display was before ColorTune: previous curves/profile restored.
+        Displays ColorTune never changed are not touched at all."""
+        sat = self.picture.saturation
+        touched = self.lut and self.touched()
         self.picture = Picture()
-        if self.lut:
-            self.apply_picture()
-        if self.filter == "ada" and not self.matrix and screenfilters.ada_saturation_usable():
-            WORKER.submit("ada:saturation", screenfilters.ada_set_saturation, 1.0)
+        if touched:
+            self._queue_restore()
+        if self.filter == "ada" and sat != 1.0:
+            self._set_picture("saturation", 1.0)
+
+
+def apply_desktop_saturation(displays):
+    """Write Ada's desktop-wide filter once, from the first Ada display's value - and
+    only if ColorTune owns the filter or it is off."""
+    ada = [d for d in displays if d.filter == "ada"]
+    if not ada:
+        return
+    status = screenfilters.ada_saturation_status()
+    v = ada[0].picture.saturation
+    if status == "theirs" or (status == "free" and v >= 1.0):
+        return
+    ada[0]._set_picture("saturation", v)
 
 
 def ensure_daemon(timeout=3.0):
@@ -321,4 +415,5 @@ def discover(env=None, probe_ddc=True, state=None):
         d.load((state or {}).get("displays", {}).get(d.key))
         displays.append(d)
     displays.sort(key=lambda d: (not d.internal, d.connector))
+    env.displays = displays
     return env, displays

@@ -66,9 +66,14 @@ class AdaFilters(unittest.TestCase):
                     "ColorFilterStrength=100\nTheme=midnight\n\n[Other]\nColorFilters=keep\n")
         self.old = screenfilters.ADA_INI
         screenfilters.ADA_INI = self.path
+        from colortune import config
+        self.config = config
+        self.old_state = config.STATE_FILE
+        config.STATE_FILE = os.path.join(self.dir, "state.json")
 
     def tearDown(self):
         self.sf.ADA_INI = self.old
+        self.config.STATE_FILE = self.old_state
 
     def test_saturation_roundtrip_keeps_other_lines(self):
         self.sf.ada_set_saturation(0.6)
@@ -83,6 +88,56 @@ class AdaFilters(unittest.TestCase):
     def test_other_filter_is_respected(self):
         self.sf.ada_set({"ColorFilters": "on", "ColorFilter": "protanopia"})
         self.assertFalse(self.sf.ada_saturation_usable())
+        self.assertIsNone(self.sf.ada_set_saturation(0.5))
+        self.assertEqual(self.sf.ada_filter_state(), (True, "protanopia", 100))
+
+    def test_users_own_greyscale_is_not_ours(self):
+        self.sf.ada_set({"ColorFilters": "on", "ColorFilter": "grayscale", "ColorFilterStrength": 100})
+        self.assertEqual(self.sf.ada_saturation_status(), "theirs")
+        self.assertIsNone(self.sf.ada_set_saturation(1.0))
+        self.assertEqual(self.sf.ada_filter_state(), (True, "grayscale", 100))
+
+    def test_users_filter_choice_restored(self):
+        self.sf.ada_set({"ColorFilter": "deuteranopia", "ColorFilterStrength": 80})
+        self.assertEqual(self.sf.ada_set_saturation(0.7), 0.7)
+        self.assertEqual(self.sf.ada_filter_state(), (True, "grayscale", 30))
+        self.sf.ada_set_saturation(1.0)
+        self.assertEqual(self.sf.ada_filter_state(), (False, "deuteranopia", 80))
+        self.assertEqual(self.sf.ada_saturation_status(), "free")
+
+    def test_stale_record_never_claims_users_greyscale(self):
+        self.sf.ada_set({"ColorFilter": "deuteranopia", "ColorFilterStrength": 80})
+        self.sf.ada_set_saturation(0.6)
+        self.sf.ada_set({"ColorFilters": "off"})          # user turns it off in Ada Settings
+        self.assertEqual(self.sf.ada_saturation_status(), "free")
+        self.assertEqual(self.sf.ada_filter_state(), (False, "deuteranopia", 80))
+        self.sf.ada_set({"ColorFilters": "on", "ColorFilter": "grayscale", "ColorFilterStrength": 100})
+        self.assertEqual(self.sf.ada_saturation_status(), "theirs")
+        self.assertIsNone(self.sf.ada_set_saturation(1.0))
+        self.assertEqual(self.sf.ada_filter_state(), (True, "grayscale", 100))
+
+    def test_users_strength_change_makes_it_theirs(self):
+        self.sf.ada_set_saturation(0.5)
+        self.sf.ada_set({"ColorFilterStrength": 70})      # user drags Ada's own slider
+        self.assertEqual(self.sf.ada_saturation_status(), "theirs")
+
+    def test_snapping(self):
+        self.assertEqual([self.sf.snap_saturation(v) for v in (0.94, 0.96, 0.43, -1)], [0.9, 1.0, 0.4, 0.0])
+
+    def test_garbage_values_dont_crash(self):
+        self.sf.ada_set({"ColorFilterStrength": "55.5x"})
+        self.assertEqual(self.sf.ada_filter_state()[2], 100)
+        with open(self.path, "ab") as f:
+            f.write(b"Wallpaper=/home/\xe9t\xe9.png\n")
+        self.sf.ada_set({"NightLight": "off"})
+        self.assertIn(b"\xe9t\xe9", open(self.path, "rb").read())
+
+    def test_header_at_end_of_file(self):
+        with open(self.path, "w") as f:
+            f.write("[General]\nX=1\n[Desktop]")
+        self.sf.ada_set({"NightLight": "off"})
+        self.assertEqual(self.sf.ada_get("NightLight"), "off")
+        self.assertEqual(open(self.path).read(), "[General]\nX=1\n[Desktop]\nNightLight=off\n")
 
 
 class AdaSections(AdaFilters):

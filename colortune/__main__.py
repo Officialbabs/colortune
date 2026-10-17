@@ -19,7 +19,11 @@ def cmd_detect(a):
         print(f"\n{d.name}  [{d.connector}]  key={d.key}")
         g = d.gamut()
         if g:
-            print(f"  Gamut: covers {g[0]:.0f}% of sRGB (area {g[1]:.0f}%)")
+            print(f"  Gamut (as the display reports it, not measured): {g[0]:.0f}% of sRGB, "
+                  f"{d.gamut_p3():.0f}% of Display P3")
+        problem = d.edid_problem()
+        if problem and d.edid.get("primaries"):
+            print(f"  Warning: the display's colour data looks wrong: {problem}")
         for label, ok, detail in d.methods():
             print(f"  {'✓' if ok else '✗'} {label}: {detail}")
         for c in d.controls():
@@ -36,36 +40,52 @@ def _select(displays, which):
 
 
 def _save(displays):
-    state = config.load_state()
-    for d in displays:
-        state["displays"][d.key] = d.to_state()
-    config.save_state(state)
+    def update(state):
+        for d in displays:
+            state["displays"][d.key] = d.to_state()
+    config.update_state(update)
 
 
 def cmd_set(a):
+    values = []
+    for kv in a.values:
+        k, eq, v = kv.partition("=")
+        try:
+            if not eq:
+                raise ValueError
+            values.append((k, float(v)))
+        except ValueError:
+            sys.exit(f"colortune set: expected control=number, got {kv!r}")
     env, displays = _displays()
-    for d in _select(displays, a.display):
+    sel = _select(displays, a.display)
+    for d in sel:  # check everything before changing anything
         controls = {c.key: c for c in d.controls()}
-        for kv in a.values:
-            k, _, v = kv.partition("=")
-            c = controls.get(k)
-            if not c:
-                sys.exit(f"{d.connector}: unknown control {k!r}. Available: {', '.join(controls)}")
-            c.setter(max(c.minimum, min(c.maximum, float(v))))
+        for k, _ in values:
+            if k not in controls:
+                sys.exit(f"{d.connector}: unknown control {k!r}. Available: {', '.join(controls) or 'none'}")
+    for d in sel:
+        controls = {c.key: c for c in d.controls()}
+        for k, v in values:
+            c = controls[k]
+            c.setter(max(c.minimum, min(c.maximum, v)))
     _finish(displays, a)
 
 
 def cmd_apply(a):
+    from .displays import apply_desktop_saturation
     env, displays = _displays()
+    sel = _select(displays, a.display)
     if a.profile:
         prof = config.load_profiles().get(a.profile)
         if prof is None:
             sys.exit(f"no profile named {a.profile!r}")
-        for d in displays:
+        for d in sel:
             d.load(prof.get(d.key), from_profile=True)
-    hold = a.hold and env.lut_method == "wlr"
-    for d in _select(displays, a.display):
-        d.apply_all(picture=not hold)
+    hold = a.hold and env.lut_method == "wlr" and any(d.picture_changed() for d in displays)
+    for d in sel:
+        # At login (no profile) the backlight is left where the user/desktop put it.
+        d.apply_all(picture=not hold, backlight=bool(a.profile), force=bool(a.profile))
+    apply_desktop_saturation(sel)
     _finish(displays, a)
     if hold:  # become the gamma-holding daemon
         from .backends import wlr
@@ -97,11 +117,15 @@ def cmd_daemon(a):
 
 
 def cmd_profile(a):
+    if a.action != "list" and not a.name:
+        sys.exit(f"colortune profile {a.action}: a profile name is required")
     profiles = config.load_profiles()
     if a.action == "list":
         for name in sorted(profiles):
             print(name)
     elif a.action == "save":
+        env, displays = _displays(probe_ddc=False)
+        _save(displays)  # live values (backlight, Ada saturation), not a stale state file
         profiles[a.name] = config.load_state()["displays"]
         config.save_profiles(profiles)
     elif a.action == "delete":

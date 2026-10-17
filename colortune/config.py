@@ -2,6 +2,9 @@
 import json
 import os
 import tempfile
+import threading
+
+_STATE_LOCK = threading.RLock()
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "colortune")
 STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
@@ -21,9 +24,10 @@ def _load(path, default):
 
 def _save(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
+    text = json.dumps(data, indent=2, sort_keys=True)  # fails before touching any file
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
     os.replace(tmp, path)
 
 
@@ -35,7 +39,17 @@ def load_state():
 
 
 def save_state(state):
-    _save(STATE_FILE, state)
+    with _STATE_LOCK:
+        _save(STATE_FILE, state)
+
+
+def update_state(fn):
+    """Read-modify-write the state file atomically with respect to this process."""
+    with _STATE_LOCK:
+        state = load_state()
+        fn(state)
+        _save(STATE_FILE, state)
+        return state
 
 
 def load_profiles():

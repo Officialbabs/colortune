@@ -4,7 +4,6 @@ hardware : backlight (sysfs/logind), DDC/CI (ddcutil) - changes the monitor itse
 lut      : x11 (XRandR gamma), wlr (wlr-gamma-control), icc (colord / KWin vcgt)
 matrix   : x11 CTM property, NVIDIA digital vibrance
 """
-import queue
 import shutil
 import subprocess
 import threading
@@ -46,37 +45,36 @@ class Coalescer:
 
     def __init__(self):
         self._pending = {}
-        self._lock = threading.Lock()
-        self._wake = queue.Queue()
+        self._busy = 0
+        self._cond = threading.Condition()
         threading.Thread(target=self._loop, daemon=True).start()
 
     def submit(self, key, fn, value):
-        with self._lock:
+        with self._cond:
+            self._pending.pop(key, None)  # re-queue at the end, latest value wins
             self._pending[key] = (fn, value)
-        self._wake.put(None)
+            self._cond.notify_all()
 
     def _loop(self):
         while True:
-            self._wake.get()
-            while True:
-                with self._lock:
-                    if not self._pending:
-                        break
-                    key = next(iter(self._pending))
-                    fn, value = self._pending.pop(key)
-                try:
-                    fn(value)
-                except Exception as e:  # keep the worker alive
-                    print(f"colortune: {key}: {e}")
+            with self._cond:
+                self._cond.wait_for(lambda: self._pending)
+                key = next(iter(self._pending))
+                fn, value = self._pending.pop(key)
+                self._busy += 1
+            try:
+                fn(value)
+            except Exception as e:  # keep the worker alive
+                print(f"colortune: {key}: {e}")
+            finally:
+                with self._cond:
+                    self._busy -= 1
+                    self._cond.notify_all()
 
     def flush(self, timeout=10):
-        import time
-        end = time.time() + timeout
-        while time.time() < end:
-            with self._lock:
-                if not self._pending and self._wake.empty():
-                    break
-            time.sleep(0.05)
+        """Wait until every submitted setter has finished running."""
+        with self._cond:
+            return self._cond.wait_for(lambda: not self._pending and not self._busy, timeout)
 
 
 WORKER = Coalescer()
