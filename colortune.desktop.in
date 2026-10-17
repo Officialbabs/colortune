@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ColorTune
+Comment=Calibrate blacks, gamma, white balance and saturation
+Exec=@EXEC@
+Icon=preferences-color
+Categories=Settings;HardwareSettings;Graphics;
+Keywords=calibration;color;colour;monitor;display;gamma;brightness;icc;
