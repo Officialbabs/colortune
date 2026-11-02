@@ -119,7 +119,7 @@ TRACKS = {
     "black": "black",
     "gamma": "tone", "contrast": "tone", "vcp12": "tone",
     "brightness": "light", "backlight": "light", "vcp10": "light",
-    "saturation": "sat", "vcp8A": "sat",
+    "saturation": "sat", "vcp8A": "sat", "boost": "sat",
 }
 
 

@@ -20,8 +20,8 @@ def label(text, *classes, xalign=0.0, wrap=False, selectable=False):
 
 
 def fmt(control, v):
-    if control.key in ("backlight", "saturation"):
-        return f"{v * (100 if control.key == 'saturation' else 1):.0f}%"
+    if control.key in ("backlight", "saturation", "boost"):
+        return f"{v * (1 if control.key == 'backlight' else 100):.0f}%"
     if control.key == "black":
         return f"{v:+.3f}".replace("-", "−") if abs(v) > 1e-9 else "0"
     if control.digits == 0:
@@ -64,6 +64,9 @@ class SliderRow(Adw.PreferencesRow):
             self.scale.add_mark(1.0, Gtk.PositionType.BOTTOM, "Natural")
             if control.maximum > 1:
                 self.scale.add_mark(control.maximum, Gtk.PositionType.BOTTOM, "Vivid")
+        elif control.key == "boost":
+            self.scale.add_mark(control.minimum, Gtk.PositionType.BOTTOM, "Natural")
+            self.scale.add_mark(control.maximum, Gtk.PositionType.BOTTOM, "Vivid")
         elif control.default is not None and control.minimum < control.default < control.maximum:
             self.scale.add_mark(control.default, Gtk.PositionType.BOTTOM, None)
         self.scale.set_value(control.value)

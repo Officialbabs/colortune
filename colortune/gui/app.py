@@ -1,4 +1,5 @@
 """ColorTune main window."""
+import dataclasses
 import os
 import shlex
 import sys
@@ -12,7 +13,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from .. import APP_ID, config, measure  # noqa: E402
-from ..backends import WORKER, ddc, screenfilters  # noqa: E402
+from ..backends import WORKER, Control, boost, ddc, screenfilters  # noqa: E402
 from ..colormath import cct  # noqa: E402
 from ..displays import LUT_LABELS, apply_desktop_saturation, discover  # noqa: E402
 from . import theme  # noqa: E402
@@ -81,6 +82,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_default_size(1020, 760)
         self.set_size_request(360, 420)
         self.env = None
+        self.boost = None  # colour boost state, where it's offered
+        self.boost_grp, self.boost_busy = None, False
+        self.boost_pending = None  # a slider value not applied yet
         self.displays, self.current, self.controls = [], None, []
         self.sliders = []
         self.page = "overview"
@@ -117,9 +121,9 @@ class MainWindow(Adw.ApplicationWindow):
         side.append(foot)
         side_tv = Adw.ToolbarView()
         side_header = Adw.HeaderBar()
-        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Detect displays again")
-        refresh.connect("clicked", lambda *_: self.load())
-        side_header.pack_start(refresh)
+        self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Detect displays again")
+        self.refresh_btn.connect("clicked", lambda *_: self.load())
+        side_header.pack_start(self.refresh_btn)
         brand = Gtk.Box(spacing=8)
         brand.append(Gtk.Image(icon_name=APP_ID, pixel_size=22))
         brand.append(label("ColorTune", "heading"))
@@ -198,12 +202,12 @@ class MainWindow(Adw.ApplicationWindow):
 
         def work():
             env, displays = discover(state=config.load_state())
-            GLib.idle_add(self._loaded, env, displays)
+            GLib.idle_add(self._loaded, env, displays, boost.state() if env.boost else None)
         threading.Thread(target=work, daemon=True).start()
 
-    def _loaded(self, env, displays):
+    def _loaded(self, env, displays, boost_state):
         keep = self.current.key if self.current else None
-        self.env, self.displays = env, displays
+        self.env, self.displays, self.boost = env, displays, boost_state
         self.current = next((d for d in displays if d.key == keep), displays[0] if displays else None)
         model = Gtk.StringList()
         for d in displays:
@@ -223,7 +227,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.rebuild()
 
     def toast(self, text, button=None, action=None, timeout=3):
-        t = Adw.Toast(title=text, timeout=timeout)
+        t = Adw.Toast(title=GLib.markup_escape_text(text), timeout=timeout)
         if button:
             t.set_button_label(button)
             t.connect("button-clicked", lambda *_: action())
@@ -289,9 +293,9 @@ class MainWindow(Adw.ApplicationWindow):
             items += [(f"{g[0]:.0f}%", "of sRGB colours"), (f"{d.gamut_p3():.0f}%", "of Display P3")]
         if prim:
             items.append((f"{round(cct(*prim['w']), -1):,.0f} K", "native white"))
-        sat = next((c for c in self.controls if c.key == "saturation"), None)
-        if sat:
-            self.sat_stat = label(f"{sat.value * 100:.0f}%", "ct-stat")
+        sat = self._sat_now()
+        if sat is not None:
+            self.sat_stat = label(f"{sat * 100:.0f}%", "ct-stat")
             items.append((self.sat_stat, "saturation now"))
         for i, (value, what) in enumerate(items):
             cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -382,6 +386,10 @@ class MainWindow(Adw.ApplicationWindow):
             for c in cs:
                 grp.add(self._slider(c))
             box.append(grp)
+        self.boost_grp = None
+        if self.boost is not None:
+            self.boost_grp = self._boost_group()
+            box.append(self.boost_grp)
         if d.lut == "icc":
             box.append(self._profile_mode_group(d))
         missing = [(n, detail) for n, ok, detail in d.methods() if not ok]
@@ -433,6 +441,133 @@ class MainWindow(Adw.ApplicationWindow):
         row.connect("notify::selected", changed)
         grp.add(row)
         return grp
+
+    def _boost_group(self):
+        """The graphics chip's colour matrix, changed through the root helper (pkexec)."""
+        st = self.boost
+        grp = Adw.PreferencesGroup(title="Colour boost",
+                                   description="Raises saturation in the graphics chip, after Ada has drawn the "
+                                               "screen. Applying blanks the screen for a moment.",
+                                   sensitive=not self.boost_busy)
+        if not st.installed or st.outdated:
+            row = Adw.ActionRow(title="Update the colour boost helper" if st.installed else "Set up colour boost",
+                                subtitle="Installs a small system helper, colortune-ctm, that may change the "
+                                         "graphics chip's colour matrix. Asks for your password.")
+            btn = Gtk.Button(label="Update" if st.installed else "Set up", valign=Gtk.Align.CENTER)
+            btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda *_: self._boost_run(("install",), "Colour boost is set up"))
+            row.add_suffix(btn)
+            grp.add(row)
+            if not st.installed:
+                return grp
+        now = st.now or 1.0
+        value = self.boost_pending if self.boost_pending is not None else now
+        control = Control("boost", "Boost", "picture", 1.0, 1.5, min(max(value, 1.0), 1.5), lambda v: None,
+                          step=0.05, digits=2, default=1.0,
+                          tip="100% leaves colours as they are. Colours already at the panel's full strength "
+                              "can't get stronger, so it shows most on everyday colours.")
+        apply_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER,
+                               sensitive=st.now is None or abs(control.value - now) > 1e-6)
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.connect("clicked", lambda *_: self._boost_set(control.value))
+
+        def moved(c):
+            changed = st.now is None or abs(c.value - now) > 1e-6  # another program's matrix: any value replaces it
+            self.boost_pending = c.value if changed else None
+            apply_btn.set_sensitive(changed)
+        grp.add(SliderRow(control, moved))
+        row = Adw.ActionRow(title="On screen now",
+                            subtitle=f"{now * 100:.0f}%" if st.now is not None
+                            else "A colour matrix another program set")
+        row.add_suffix(apply_btn)
+        grp.add(row)
+        if st.startup is not None:
+            kept = f"Sets {st.startup * 100:.0f}% again each time the computer starts"
+        elif not st.startup_possible:
+            kept = "Needs the greetd sign-in screen"
+        elif st.now is None:
+            kept = "Apply a boost first: another program's colour matrix can't be kept"
+        else:
+            kept = f"Sets what's on screen now ({now * 100:.0f}%) again each time the computer starts"
+        keep = Adw.SwitchRow(title="Keep after restart", subtitle=kept, active=st.startup is not None,
+                             sensitive=st.startup is not None or (st.startup_possible and st.now is not None))
+        keep.connect("notify::active", lambda sw, _: self._boost_run(
+            ("startup", f"{now:.2f}") if sw.get_active() else ("startup", "off"),
+            "Kept after restart" if sw.get_active() else "No longer set at startup"))
+        grp.add(keep)
+        return grp
+
+    def _boost_set(self, v):
+        self._boost_run(("set", f"{v:.2f}" if v > 1.0 else "off"),
+                        f"Colour boost {v * 100:.0f}%" if v > 1.0 else "Colour boost off")
+
+    def _boost_run(self, args, done):
+        if self.boost_busy:
+            return
+        self.boost_busy = True
+        self.refresh_btn.set_sensitive(False)  # detecting displays opens the graphics card
+        if self.boost_grp is not None:
+            self.boost_grp.set_sensitive(False)
+        prev = self.boost
+
+        def work():
+            err = boost.run(*args)
+            applied = args[0] == "set" and (err is None or err.startswith(boost.kms.APPLIED_BUT))
+            if applied:
+                # What it set is known: no need to open the graphics card while Ada is
+                # still taking the screen back (the helper waits for that, too).
+                v = 1.0 if args[1] == "off" else float(args[1])
+                st = dataclasses.replace(prev, now=v, startup=v if prev.startup is not None else None)
+            elif err and "Ctrl+Alt" in err:
+                st = prev  # the desktop may not have the screen back: leave the card alone
+            else:
+                st = boost.state(prev)  # the helper only returns once the desktop has it back
+            GLib.idle_add(self._boost_done, st, err, done, applied)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _boost_done(self, st, err, done, applied=False):
+        self.boost, self.boost_busy = st, False
+        self.refresh_btn.set_sensitive(True)
+        if applied:
+            self.boost_pending = None
+        old = self.boost_grp
+        if old is not None and old.get_parent() is not None:
+            self.boost_grp = self._boost_group()
+            old.get_parent().insert_child_after(self.boost_grp, old)
+            old.get_parent().remove(old)
+        self._show_sat()
+        if err == "cancelled":
+            self.toast("Cancelled")
+        elif err and applied:
+            rest = err[len(boost.kms.APPLIED_BUT):]
+            self.alert(f"{done}, but there was a problem", rest[0].upper() + rest[1:])
+        elif err:
+            self.alert("The colour boost didn't change", err[0].upper() + err[1:])
+        else:
+            self.toast(done)
+        return False
+
+    def alert(self, heading, body):
+        if hasattr(Adw, "AlertDialog"):  # libadwaita 1.5+
+            d = Adw.AlertDialog(heading=heading, body=body)
+            d.add_response("ok", "OK")
+            d.present(self)
+        else:
+            d = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
+            d.add_response("ok", "OK")
+            d.present()
+
+    def _sat_now(self):
+        """Saturation on screen: Ada's filter and the colour boost multiply."""
+        sat = next((c for c in self.controls if c.key == "saturation"), None)
+        if sat is None and self.boost is None:
+            return None
+        return (sat.value if sat else 1.0) * ((self.boost.now or 1.0) if self.boost else 1.0)
+
+    def _show_sat(self):
+        v = self._sat_now()
+        if v is not None and getattr(self, "sat_stat", None):
+            self.sat_stat.set_text(f"{v * 100:.0f}%")
 
     def _slider(self, c):
         s = SliderRow(c, self._changed)
@@ -526,7 +661,9 @@ class MainWindow(Adw.ApplicationWindow):
             box.append(grp)
         presets = Adw.PreferencesGroup(title="Built in")
         row = Adw.ActionRow(title="Accurate",
-                            subtitle="Neutral curves and saturation, and any calibration you had before ColorTune put back")
+                            subtitle="Neutral curves and saturation, and any calibration you had before ColorTune "
+                                     "put back" + (". The colour boost is set separately (Adjust → Colour boost)."
+                                                   if self.boost is not None else ""))
         b = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
         b.connect("clicked", lambda *_: self.apply_accurate())
         row.add_suffix(b)
@@ -543,8 +680,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ------------------------------------------------------------ actions
     def _changed(self, control):
-        if control.key == "saturation" and getattr(self, "sat_stat", None):
-            self.sat_stat.set_text(f"{control.value * 100:.0f}%")
+        if control.key == "saturation":
+            self._show_sat()
         self.save_later()
         GLib.timeout_add(800, self._show_error)
 
@@ -608,9 +745,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _resync(self):
         for s in self.sliders:
             s.sync()
-        sat = next((c for c in self.controls if c.key == "saturation"), None)
-        if sat and getattr(self, "sat_stat", None):
-            self.sat_stat.set_text(f"{sat.value * 100:.0f}%")
+        self._show_sat()
         self.refresh_banner()
 
     def save_state(self):
@@ -658,8 +793,12 @@ class MainWindow(Adw.ApplicationWindow):
             d.reset()
         WORKER.flush(timeout=5)
         self.save_state()
-        self.toast("Back to neutral")
         self.rebuild()
+        if self.boost is not None and self.boost.now != 1.0:  # None: another program's matrix
+            self.toast("Back to neutral, but the colour boost is still on", "Turn off",
+                       lambda: self._boost_set(1.0), timeout=8)
+        else:
+            self.toast("Back to neutral")
 
 
 class MeasurePage(Gtk.ScrolledWindow):

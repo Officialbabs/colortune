@@ -1,0 +1,4 @@
+#!/bin/sh
+# Screen saturation through the graphics chip's colour matrix (see colortune/kms.py).
+here="$(dirname "$(readlink -f "$0")")"
+exec python3 -I "$here/../colortune/kms.py" "$@"

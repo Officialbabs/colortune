@@ -14,6 +14,7 @@ ColorTune detects what your system allows and uses the best method available for
 | | | ICC profile with `vcgt` curves via colord / `kscreen-doctor` | GNOME, KDE Plasma 6 |
 | **Saturation** | Colour matrix | NVIDIA Digital Vibrance, X11 `CTM` property (AMD/Intel), or monitor DDC | See left |
 | | Reduce only | Ada's colour filter (greyscale intensity) | Ada desktop |
+| | Boost | The graphics chip's colour matrix (KMS `CTM`), through a small root helper | Ada (keeping it after restart needs greetd) |
 | **Night Light check** | Warns when the screen is being warmed, and can pause it | Ada, GNOME (until tomorrow); KDE, gammastep, redshift, wlsunset (warning only) | |
 | **Measurement** | Luminance, contrast ratio, white point, auto white balance to D65 | ArgyllCMS `spotread` + any supported colorimeter | Everywhere |
 
@@ -46,7 +47,7 @@ The app has five pages: **Overview** (your display's colour range plotted agains
    | ↑ ↓ | Adjust this step's setting, with an on-screen readout. Works with the panel hidden |
    | H | Hide the panel |
    | Esc | Close |
-3. Save the result as a profile (for example *Movies*, *Night* or *Photo editing*). The built-in **Accurate** profile puts everything back to neutral.
+3. Save the result as a profile (for example *Movies*, *Night* or *Photo editing*). The built-in **Accurate** profile puts everything back to neutral, apart from the colour boost, which is set separately (Adjust → Colour boost).
 4. Turn on **Apply at login** on the Profiles page. This re-applies your settings but leaves the backlight where it is.
 
 If you have a colorimeter, the **Measure** page detects it, lets you pick the screen type (backlight technology) for more accurate readings, and measures white and black luminance, contrast ratio and colour temperature. **Auto white balance** adjusts the RGB gains in a loop until white hits D65. Press Esc to cancel; the gains are put back.
@@ -58,6 +59,41 @@ If you have a colorimeter, the **Measure** page detects it, lets you pick the sc
 - **The monitor's colour mode** (sRGB / User…) only changes when you pick one on the Adjust page. RGB gains usually only work in *User* mode.
 - **On GNOME and KDE the profile also drives colour management**, so by default it describes the screen as sRGB with your curves applied (*Curves only*). That means colours look as they did before. *Display's reported colours* uses the screen's EDID instead, but only if that data passes a sanity check.
 - **On Ada, the saturation slider only uses the colour filter when the filter is off or ColorTune turned it on.** Your own filter choice is put back when saturation returns to 100%, and an accessibility filter you turned on yourself is never touched. The filter covers the whole desktop, so saturation is one setting for all screens.
+
+### More saturation on Ada
+
+The graphics chip has a colour matrix that it applies after the desktop has drawn the screen, at no cost. Ada never touches it, so ColorTune can use it to raise saturation (Ada's own colour filter can only lower it).
+
+In the app, open **Adjust → Colour boost**:
+
+1. Press **Set up** once. This installs a small system helper, `colortune-ctm`, and asks for your password.
+2. Move the **Boost** slider and press **Apply**. The screen goes blank for about a second: only the program in charge of the screen may change the matrix, so the helper briefly switches to a spare text console, where Ada lets go of the screen, sets it, and switches back. Your password is remembered for a few minutes, so you can try a few values.
+3. Turn on **Keep after restart** to have it set again at every startup, just before the sign-in screen appears.
+
+The Overview's *saturation now* includes the boost. The built-in **Accurate** profile leaves the boost alone and offers to turn it off.
+
+From a terminal:
+
+```bash
+sudo bin/colortune-ctm install        # the helper (once); `install 1.25` also keeps 1.25 after restart
+sudo colortune-ctm set 1.25           # now; from the desktop the screen blanks for a moment
+sudo colortune-ctm startup 1.25       # also at every startup (`startup off` to stop)
+sudo colortune-ctm set off            # back to normal
+colortune-ctm status                  # what the screen is doing now
+sudo colortune-ctm uninstall          # remove it all
+```
+
+On a text console (Ctrl+Alt+F3), `sudo bin/colortune-ctm try 1.25` flips between normal and vivid for 12 seconds on everyday sample colours, then puts things back.
+
+`install` copies the helper to `/usr/local/libexec/colortune-ctm` (linked as `/usr/local/sbin/colortune-ctm`) and adds a polkit action for it. `startup` saves the value in `/etc/colortune/saturation` and adds a step to the sign-in screen's service (`/etc/systemd/system/greetd.service.d/colortune-ctm.conf`). That step gives up after a few seconds and never stops the sign-in screen from starting. To skip it for one boot, add `colortune.ctm=0` to the kernel command line.
+
+Good to know:
+
+- The boost covers every screen, the sign-in screen included, and stacks with Night Light and Ada's colour filter.
+- Screenshots and screen recordings don't show it, because it's applied after them.
+- It works on the screen's encoded values, as NVIDIA's Digital Vibrance does, and keeps greys and white neutral (exactly, on Intel Ice Lake and newer; older Intel chips sending TV-range output can be off by one level).
+- While switching, keys you press wait until the helper has let go of the screen, so Ada always gets it back.
+- Startup only works with greetd. GDM and LightDM take the screen over from the boot splash themselves, so there is no moment to set it, and X11 sign-in screens reset the matrix when they start. The desktop you sign in to must leave the matrix alone too, as Ada does; `colortune-ctm status` tells you if something resets it.
 
 ### Command line
 
@@ -75,7 +111,7 @@ colortune reset
 - **Gamut can't be added.** A panel that covers about 60% of sRGB, as many budget laptop panels do, can't show sRGB colours at full saturation. Raising Saturation makes colours punchier but less accurate.
 - **Blacks on LCD:** the deepest black comes from lowering the backlight or monitor brightness. A negative *Black point* hides the grey glow on near-black content, but it also hides shadow detail, so keep it small.
 - **Wayland compositors that offer no colour API** (only some do) limit ColorTune to the hardware controls and test patterns. `colortune detect` shows this.
-- **Saturation can only be raised** where something can apply a colour matrix: X11 with a CTM-capable driver, NVIDIA, or a monitor with a DDC saturation control. On Ada, saturation can only be lowered, through its colour filter.
+- **Saturation can only be raised** where something can apply a colour matrix: X11 with a CTM-capable driver, NVIDIA, a monitor with a DDC saturation control, or the colour boost on Ada. Ada's colour filter can only lower it.
 - Without a colorimeter, calibration is judged by eye. It can still get close, but only a measurement is objective.
 
 ## Files
@@ -83,6 +119,7 @@ colortune reset
 - `~/.config/colortune/state.json`: current settings per display. Keys follow the monitor's EDID, so settings move with the monitor across ports.
 - `~/.config/colortune/profiles.json`: saved profiles.
 - `~/.local/share/colortune/profiles/*.icc`: generated ICC profiles (on GNOME and KDE).
+- `/etc/colortune/saturation`: the colour boost set at startup, if *Keep after restart* is on.
 - `COLORTUNE_SPOTREAD_ARGS`: extra arguments for ArgyllCMS `spotread`, e.g. a `-X file.ccss` correction.
 
 ## Tests

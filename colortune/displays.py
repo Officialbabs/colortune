@@ -7,7 +7,7 @@ import time
 
 from . import config
 from . import edid as edidmod
-from .backends import WORKER, Control, backlight, ddc, icc, screenfilters, wlr, x11
+from .backends import WORKER, Control, backlight, boost, ddc, icc, screenfilters, wlr, x11
 from .colormath import DISPLAY_P3, srgb_coverage
 from .config import DAEMON_SOCKET
 from .edid import validate_primaries
@@ -45,6 +45,7 @@ class Environment:
         self.nvidia = x11.nvidia_available() and self.x11 is not None
         self.ddc = ddc.available()
         self.ada = screenfilters.ada_available()
+        self.boost = boost.available(self)
         self.displays = []
         self.refresh_night_light()
 
@@ -168,6 +169,8 @@ class Display:
         if self.filter == "ada":
             if self.ada_saturation_status() == "theirs":
                 return "Ada's colour filter is already in use. Turn it off in Settings → Colour filters to use this"
+            if self.env.boost:
+                return "Ada colour filter lowers it; the graphics chip's colour matrix raises it (Colour boost)"
             return "Ada colour filter: can lower saturation, not raise it"
         return None
 
